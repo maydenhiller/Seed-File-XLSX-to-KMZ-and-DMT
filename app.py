@@ -1,7 +1,8 @@
 # app.py
 # Seed File XLSX to KMZ and DMT
-# Upload a Google Earth Seed File (.xlsx); download BOTH a KMZ (Earthpoint-style)
-# and a DeLorme Street Atlas .dmt with AGMs, Access, Centerline and Notes layers.
+# Upload a Google Earth Seed File (.xlsx); name the output; download BOTH a KMZ
+# (Earthpoint-style) and a DeLorme Street Atlas .dmt with AGMs, Access,
+# Centerline and Notes layers.
 
 import os
 import re
@@ -1765,11 +1766,11 @@ def read_sheets(file_like):
 
 
 def add_logo_overlay_xml(kml_bytes):
-    """Insert the Gibson logo as a SMALL ScreenOverlay anchored in the LOWER-RIGHT.
+    """Insert the Gibson logo ScreenOverlay with the EXACT size/placement used by
+    the reference KMZs: lower-left, 300px wide, logo at files/logo.png.
 
-    Done as explicit KML XML (instead of via simplekml) so the placement is
-    identical on every simplekml version and never falls back to a centered
-    default overlay.
+    Written as explicit KML XML (not via simplekml) so it is identical on every
+    simplekml version and never falls back to a centered default overlay.
     """
     try:
         root = ET.fromstring(kml_bytes)
@@ -1789,15 +1790,13 @@ def add_logo_overlay_xml(kml_bytes):
 
     so = ET.Element(Q("ScreenOverlay"))
     nm = ET.SubElement(so, Q("name")); nm.text = "Gibson Logo"
+    op = ET.SubElement(so, Q("open")); op.text = "1"
     icon = ET.SubElement(so, Q("Icon"))
-    href = ET.SubElement(icon, Q("href")); href.text = "logo.png"
-    # overlayXY = the point on the IMAGE that gets pinned (image bottom-right)
-    ET.SubElement(so, Q("overlayXY"), {"x": "1", "y": "0", "xunits": "fraction", "yunits": "fraction"})
-    # screenXY = where on the SCREEN that point lands (near bottom-right, small inset)
-    ET.SubElement(so, Q("screenXY"), {"x": "0.99", "y": "0.02", "xunits": "fraction", "yunits": "fraction"})
+    href = ET.SubElement(icon, Q("href")); href.text = "files/logo.png"
+    ET.SubElement(so, Q("overlayXY"), {"x": "0", "y": "0", "xunits": "fraction", "yunits": "fraction"})
+    ET.SubElement(so, Q("screenXY"), {"x": "25", "y": "95", "xunits": "pixels", "yunits": "pixels"})
     ET.SubElement(so, Q("rotationXY"), {"x": "0.5", "y": "0.5", "xunits": "fraction", "yunits": "fraction"})
-    # width 140px, height auto (y=0 keeps aspect ratio in KML)
-    ET.SubElement(so, Q("size"), {"x": "140", "y": "0", "xunits": "pixels", "yunits": "pixels"})
+    ET.SubElement(so, Q("size"), {"x": "300", "y": "0", "xunits": "pixels", "yunits": "pixels"})
 
     name_el = doc.find(Q("name"))
     if name_el is not None:
@@ -1865,7 +1864,7 @@ def build_kmz(df_agms, df_access, df_center, df_notes):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("doc.kml", modified_kml)
-        zf.writestr("logo.png", base64.b64decode(GIBSON_LOGO_B64))
+        zf.writestr("files/logo.png", base64.b64decode(GIBSON_LOGO_B64))
     return buf.getvalue()
 
 
@@ -1876,6 +1875,14 @@ def build_both(xlsx_bytes):
     kmz = build_kmz(df_agms, df_access, df_center, df_notes)
     dmt = generate_dmt(kmz)
     return kmz, dmt
+
+
+def safe_filename(name, fallback):
+    name = (name or "").strip()
+    name = os.path.splitext(name)[0]          # drop any extension the user typed
+    name = re.sub(r'[\\/:*?"<>|]+', "_", name)  # strip characters illegal in filenames
+    name = name.strip().rstrip(".")
+    return name or fallback
 
 
 def bundle_zip(kmz, dmt, base):
@@ -1892,8 +1899,9 @@ def bundle_zip(kmz, dmt, base):
 st.set_page_config(page_title="Seed File XLSX to KMZ and DMT",
                    page_icon=":world_map:", layout="centered")
 st.title("Seed File XLSX to KMZ and DMT")
-st.caption("Drop in your Google Earth Seed File (.xlsx). One button gives you "
-           "BOTH the KMZ (Earthpoint-style) and the DeLorme Street Atlas .dmt.")
+st.caption("Drop in your Google Earth Seed File (.xlsx), name the output, then "
+           "hit one button to download BOTH the KMZ (Earthpoint-style) and the "
+           "DeLorme Street Atlas .dmt.")
 
 uploaded_xlsx = st.file_uploader("Upload Google Earth Seed File (.xlsx)", type=["xlsx"])
 
@@ -1902,7 +1910,7 @@ if uploaded_xlsx is None:
     st.stop()
 
 xlsx_bytes = uploaded_xlsx.getvalue()
-base = os.path.splitext(uploaded_xlsx.name)[0]
+default_base = os.path.splitext(uploaded_xlsx.name)[0]
 
 # preview the sheets
 try:
@@ -1921,6 +1929,12 @@ with tab3:
 with tab4:
     st.dataframe(df_notes if df_notes is not None else pd.DataFrame())
 
+# desired output file name (applies to BOTH files)
+typed = st.text_input("Output file name (used for both the .kmz and .dmt)",
+                      value=default_base)
+out_name = safe_filename(typed, default_base)
+st.caption("Files will be saved as **%s.kmz** and **%s.dmt**." % (out_name, out_name))
+
 # build both up front (cached) so every download button works on its own
 try:
     with st.spinner("Building KMZ + DMT ..."):
@@ -1934,15 +1948,15 @@ st.success("Both files are ready.")
 # ONE button -> both outputs (a .zip containing the .kmz and the .dmt)
 st.download_button(
     "Download KMZ + DMT (.zip)",
-    data=bundle_zip(kmz_data, dmt_data, base),
-    file_name="%s_KMZ_DMT.zip" % base,
+    data=bundle_zip(kmz_data, dmt_data, out_name),
+    file_name="%s.zip" % out_name,
     mime="application/zip",
     type="primary",
 )
 
-# individual downloads too (optional) - these now persist correctly
+# individual downloads too (optional) - these persist correctly
 c1, c2 = st.columns(2)
-c1.download_button("KMZ only", data=kmz_data, file_name="%s.kmz" % base,
+c1.download_button("KMZ only", data=kmz_data, file_name="%s.kmz" % out_name,
                    mime="application/vnd.google-earth.kmz")
-c2.download_button("DMT only", data=dmt_data, file_name="%s.dmt" % base,
+c2.download_button("DMT only", data=dmt_data, file_name="%s.dmt" % out_name,
                    mime="application/octet-stream")
