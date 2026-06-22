@@ -1899,9 +1899,9 @@ def bundle_zip(kmz, dmt, base):
 st.set_page_config(page_title="Seed File XLSX to KMZ and DMT",
                    page_icon=":world_map:", layout="centered")
 st.title("Seed File XLSX to KMZ and DMT")
-st.caption("Drop in your Google Earth Seed File (.xlsx), name the output, then "
-           "hit one button to download BOTH the KMZ (Earthpoint-style) and the "
-           "DeLorme Street Atlas .dmt.")
+st.caption("Drop in your Google Earth Seed File (.xlsx), set the output name, "
+           "then download BOTH the KMZ (Earthpoint-style) and the DeLorme "
+           "Street Atlas .dmt.")
 
 uploaded_xlsx = st.file_uploader("Upload Google Earth Seed File (.xlsx)", type=["xlsx"])
 
@@ -1929,12 +1929,6 @@ with tab3:
 with tab4:
     st.dataframe(df_notes if df_notes is not None else pd.DataFrame())
 
-# desired output file name (applies to BOTH files)
-typed = st.text_input("Output file name (used for both the .kmz and .dmt)",
-                      value=default_base)
-out_name = safe_filename(typed, default_base)
-st.caption("Files will be saved as **%s.kmz** and **%s.dmt**." % (out_name, out_name))
-
 # build both up front (cached) so every download button works on its own
 try:
     with st.spinner("Building KMZ + DMT ..."):
@@ -1943,7 +1937,17 @@ except Exception as e:
     st.exception(e)
     st.stop()
 
-st.success("Both files are ready.")
+# --- Output name -----------------------------------------------------------
+# The name lives in a form so it is COMMITTED via the "Apply name" button
+# before the download buttons render. With a plain text box, a download click
+# fires before the typed value registers, so the old name would be used.
+with st.form("name_form"):
+    typed = st.text_input("Output file name (used for both the .kmz and .dmt)",
+                          value=default_base)
+    st.form_submit_button("Apply name")
+
+out_name = safe_filename(typed, default_base)
+st.success("Ready. Files will download as **%s.kmz** and **%s.dmt**." % (out_name, out_name))
 
 # ONE button -> both outputs (a .zip containing the .kmz and the .dmt)
 st.download_button(
