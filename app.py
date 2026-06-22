@@ -2,10 +2,6 @@
 # Seed File XLSX to KMZ and DMT
 # Upload a Google Earth Seed File (.xlsx); download BOTH a KMZ (Earthpoint-style)
 # and a DeLorme Street Atlas .dmt with AGMs, Access, Centerline and Notes layers.
-#
-# This single file merges two apps:
-#   1) XLSX -> KMZ generator  (builds the KMZ in memory)
-#   2) KMZ  -> DMT generator  (consumes that KMZ and writes the .dmt)
 
 import os
 import re
@@ -1746,10 +1742,10 @@ def _active_stream(active_name):
 
 
 # ===========================================================================
-# PART 3 : glue helpers (refactored from the original Streamlit UIs)
+# PART 3 : glue helpers
 # ===========================================================================
 def read_sheets(file_like):
-    """Read the seed workbook and return (AGMs, Access, Centerline, Notes) frames."""
+    """Read the seed workbook -> (AGMs, Access, Centerline, Notes) frames."""
     df_dict = pd.read_excel(file_like, sheet_name=None)
     normalized = {k.strip().upper(): v for k, v in df_dict.items()}
 
@@ -1768,12 +1764,52 @@ def read_sheets(file_like):
             get_sheet("NOTES"))
 
 
-def build_kmz(df_agms, df_access, df_center, df_notes):
-    """Build the KMZ (bytes) exactly as the original XLSX-To-KMZ Generator does."""
-    kml = simplekml.Kml()
+def add_logo_overlay_xml(kml_bytes):
+    """Insert the Gibson logo as a SMALL ScreenOverlay anchored in the LOWER-RIGHT.
 
-    # Gibson logo on every output
-    add_gibson_logo_overlay(kml)
+    Done as explicit KML XML (instead of via simplekml) so the placement is
+    identical on every simplekml version and never falls back to a centered
+    default overlay.
+    """
+    try:
+        root = ET.fromstring(kml_bytes)
+    except Exception:
+        return kml_bytes
+    doc = root.find(".//" + Q("Document"))
+    if doc is None:
+        doc = root if root.tag == Q("Document") else None
+    if doc is None:
+        return kml_bytes
+
+    # don't add it twice
+    for so in doc.findall(Q("ScreenOverlay")):
+        nm = so.find(Q("name"))
+        if nm is not None and (nm.text or "").strip() == "Gibson Logo":
+            return kml_bytes
+
+    so = ET.Element(Q("ScreenOverlay"))
+    nm = ET.SubElement(so, Q("name")); nm.text = "Gibson Logo"
+    icon = ET.SubElement(so, Q("Icon"))
+    href = ET.SubElement(icon, Q("href")); href.text = "logo.png"
+    # overlayXY = the point on the IMAGE that gets pinned (image bottom-right)
+    ET.SubElement(so, Q("overlayXY"), {"x": "1", "y": "0", "xunits": "fraction", "yunits": "fraction"})
+    # screenXY = where on the SCREEN that point lands (near bottom-right, small inset)
+    ET.SubElement(so, Q("screenXY"), {"x": "0.99", "y": "0.02", "xunits": "fraction", "yunits": "fraction"})
+    ET.SubElement(so, Q("rotationXY"), {"x": "0.5", "y": "0.5", "xunits": "fraction", "yunits": "fraction"})
+    # width 140px, height auto (y=0 keeps aspect ratio in KML)
+    ET.SubElement(so, Q("size"), {"x": "140", "y": "0", "xunits": "pixels", "yunits": "pixels"})
+
+    name_el = doc.find(Q("name"))
+    if name_el is not None:
+        doc.insert(list(doc).index(name_el) + 1, so)
+    else:
+        doc.insert(0, so)
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+def build_kmz(df_agms, df_access, df_center, df_notes):
+    """Build the KMZ (bytes) exactly like the original XLSX-To-KMZ Generator."""
+    kml = simplekml.Kml()
 
     # Notes hide flags
     notes_flags_by_name = {}
@@ -1794,13 +1830,11 @@ def build_kmz(df_agms, df_access, df_center, df_notes):
                     hide_flag = True
             notes_flags_by_name[nm] = hide_flag
 
-    # AGMs
     if df_agms is not None:
         folder = kml.newfolder(name="AGMs")
         for _, row in df_agms.iterrows():
             add_agm_point(folder, row)
 
-    # Access (keeps LineStringColor)
     if df_access is not None:
         folder = kml.newfolder(name="Access")
         created = add_lines_with_autosplit(folder, df_access, color_col="LineStringColor", split_jump_m=5000.0)
@@ -1808,7 +1842,6 @@ def build_kmz(df_agms, df_access, df_center, df_notes):
             for _, row in df_access.iterrows():
                 add_access_point(folder, row)
 
-    # Centerline (split on big jumps so it won't connect distant blocks)
     if df_center is not None:
         folder = kml.newfolder(name="Centerline")
         created = add_lines_with_autosplit(folder, df_center, color_col="LineStringColor", split_jump_m=5000.0)
@@ -1816,25 +1849,40 @@ def build_kmz(df_agms, df_access, df_center, df_notes):
             for _, row in df_center.iterrows():
                 add_access_point(folder, row)
 
-    # Notes
     if df_notes is not None:
         folder = kml.newfolder(name="Notes")
         for _, row in df_notes.iterrows():
             add_note_point(folder, row)
 
-    # Build + inject hover styles for Notes only
     raw_kml = kml.kml().encode("utf-8")
     modified_kml = inject_hover_stylemaps_for_notes_with_flags(
         raw_kml,
         notes_flags_by_name=notes_flags_by_name,
         notes_folder_name="Notes",
     )
+    modified_kml = add_logo_overlay_xml(modified_kml)
 
-    # Package KMZ
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("doc.kml", modified_kml)
         zf.writestr("logo.png", base64.b64decode(GIBSON_LOGO_B64))
+    return buf.getvalue()
+
+
+@st.cache_data(show_spinner=False)
+def build_both(xlsx_bytes):
+    """Build KMZ + DMT once and cache, so download clicks never re-run them."""
+    df_agms, df_access, df_center, df_notes = read_sheets(io.BytesIO(xlsx_bytes))
+    kmz = build_kmz(df_agms, df_access, df_center, df_notes)
+    dmt = generate_dmt(kmz)
+    return kmz, dmt
+
+
+def bundle_zip(kmz, dmt, base):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(base + ".kmz", kmz)
+        z.writestr(base + ".dmt", dmt)
     return buf.getvalue()
 
 
@@ -1844,10 +1892,8 @@ def build_kmz(df_agms, df_access, df_center, df_notes):
 st.set_page_config(page_title="Seed File XLSX to KMZ and DMT",
                    page_icon=":world_map:", layout="centered")
 st.title("Seed File XLSX to KMZ and DMT")
-st.caption("Upload your Google Earth Seed File (.xlsx). Produces BOTH a KMZ "
-           "(Earthpoint-style) and a DeLorme Street Atlas .dmt with AGMs, "
-           "Access, Centerline and Notes layers — same parameters as the "
-           "original two apps.")
+st.caption("Drop in your Google Earth Seed File (.xlsx). One button gives you "
+           "BOTH the KMZ (Earthpoint-style) and the DeLorme Street Atlas .dmt.")
 
 uploaded_xlsx = st.file_uploader("Upload Google Earth Seed File (.xlsx)", type=["xlsx"])
 
@@ -1855,48 +1901,48 @@ if uploaded_xlsx is None:
     st.info("Upload a .xlsx seed file to begin.")
     st.stop()
 
+xlsx_bytes = uploaded_xlsx.getvalue()
+base = os.path.splitext(uploaded_xlsx.name)[0]
+
+# preview the sheets
 try:
-    df_agms, df_access, df_center, df_notes = read_sheets(uploaded_xlsx)
+    df_agms, df_access, df_center, df_notes = read_sheets(io.BytesIO(xlsx_bytes))
 except Exception as e:
     st.error("Failed to read Excel file: %s" % e)
     st.stop()
 
 tab1, tab2, tab3, tab4 = st.tabs(["AGMs", "Access", "Centerline", "Notes"])
 with tab1:
-    st.subheader("AGMs")
     st.dataframe(df_agms if df_agms is not None else pd.DataFrame())
 with tab2:
-    st.subheader("Access")
     st.dataframe(df_access if df_access is not None else pd.DataFrame())
 with tab3:
-    st.subheader("Centerline")
     st.dataframe(df_center if df_center is not None else pd.DataFrame())
 with tab4:
-    st.subheader("Notes")
     st.dataframe(df_notes if df_notes is not None else pd.DataFrame())
 
-base = os.path.splitext(uploaded_xlsx.name)[0]
+# build both up front (cached) so every download button works on its own
+try:
+    with st.spinner("Building KMZ + DMT ..."):
+        kmz_data, dmt_data = build_both(xlsx_bytes)
+except Exception as e:
+    st.exception(e)
+    st.stop()
 
-if st.button("Generate KMZ + DMT", type="primary"):
-    with st.spinner("Building KMZ ..."):
-        try:
-            kmz_data = build_kmz(df_agms, df_access, df_center, df_notes)
-        except Exception as e:
-            st.exception(e)
-            st.stop()
+st.success("Both files are ready.")
 
-    with st.spinner("Building DeLorme .dmt ..."):
-        try:
-            dmt_data = generate_dmt(kmz_data)
-        except Exception as e:
-            st.exception(e)
-            st.stop()
+# ONE button -> both outputs (a .zip containing the .kmz and the .dmt)
+st.download_button(
+    "Download KMZ + DMT (.zip)",
+    data=bundle_zip(kmz_data, dmt_data, base),
+    file_name="%s_KMZ_DMT.zip" % base,
+    mime="application/zip",
+    type="primary",
+)
 
-    st.success("Done! Both files are ready.")
-    c1, c2 = st.columns(2)
-    c1.download_button("Download KMZ", data=kmz_data,
-                       file_name="%s.kmz" % base,
-                       mime="application/vnd.google-earth.kmz")
-    c2.download_button("Download DMT", data=dmt_data,
-                       file_name="%s.dmt" % base,
-                       mime="application/octet-stream")
+# individual downloads too (optional) - these now persist correctly
+c1, c2 = st.columns(2)
+c1.download_button("KMZ only", data=kmz_data, file_name="%s.kmz" % base,
+                   mime="application/vnd.google-earth.kmz")
+c2.download_button("DMT only", data=dmt_data, file_name="%s.dmt" % base,
+                   mime="application/octet-stream")
