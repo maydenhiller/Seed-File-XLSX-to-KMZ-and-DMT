@@ -17,6 +17,7 @@ import xml.etree.ElementTree as ET
 import streamlit as st
 import pandas as pd
 import simplekml
+import streamlit.components.v1 as components
 
 
 # ===========================================================================
@@ -1900,8 +1901,8 @@ st.set_page_config(page_title="Seed File XLSX to KMZ and DMT",
                    page_icon=":world_map:", layout="centered")
 st.title("Seed File XLSX to KMZ and DMT")
 st.caption("Drop in your Google Earth Seed File (.xlsx), set the output name, "
-           "then download BOTH the KMZ (Earthpoint-style) and the DeLorme "
-           "Street Atlas .dmt.")
+           "then hit one button to download BOTH the KMZ (Earthpoint-style) and "
+           "the DeLorme Street Atlas .dmt as a .zip.")
 
 uploaded_xlsx = st.file_uploader("Upload Google Earth Seed File (.xlsx)", type=["xlsx"])
 
@@ -1929,7 +1930,7 @@ with tab3:
 with tab4:
     st.dataframe(df_notes if df_notes is not None else pd.DataFrame())
 
-# build both up front (cached) so every download button works on its own
+# build both up front (cached) so the click is instant
 try:
     with st.spinner("Building KMZ + DMT ..."):
         kmz_data, dmt_data = build_both(xlsx_bytes)
@@ -1937,30 +1938,31 @@ except Exception as e:
     st.exception(e)
     st.stop()
 
-# --- Output name -----------------------------------------------------------
-# The name lives in a form so it is COMMITTED via the "Apply name" button
-# before the download buttons render. With a plain text box, a download click
-# fires before the typed value registers, so the old name would be used.
-with st.form("name_form"):
-    typed = st.text_input("Output file name (used for both the .kmz and .dmt)",
-                          value=default_base)
-    st.form_submit_button("Apply name")
+# Output name + single download button.
+# Clicking the button reruns the script, which commits the text box value, so the
+# name is correct on the same run -- then we auto-start the .zip download via a
+# tiny browser script (created in the PARENT document so it isn't sandbox-blocked).
+name = st.text_input("Output file name (used for both the .kmz and .dmt)",
+                     value=default_base, key="outname")
 
-out_name = safe_filename(typed, default_base)
-st.success("Ready. Files will download as **%s.kmz** and **%s.dmt**." % (out_name, out_name))
-
-# ONE button -> both outputs (a .zip containing the .kmz and the .dmt)
-st.download_button(
-    "Download KMZ + DMT (.zip)",
-    data=bundle_zip(kmz_data, dmt_data, out_name),
-    file_name="%s.zip" % out_name,
-    mime="application/zip",
-    type="primary",
-)
-
-# individual downloads too (optional) - these persist correctly
-c1, c2 = st.columns(2)
-c1.download_button("KMZ only", data=kmz_data, file_name="%s.kmz" % out_name,
-                   mime="application/vnd.google-earth.kmz")
-c2.download_button("DMT only", data=dmt_data, file_name="%s.dmt" % out_name,
-                   mime="application/octet-stream")
+if st.button("Download KMZ + DMT (.zip)", type="primary"):
+    out_name = safe_filename(st.session_state.get("outname", name), default_base)
+    zip_bytes = bundle_zip(kmz_data, dmt_data, out_name)
+    b64 = base64.b64encode(zip_bytes).decode()
+    fname = out_name + ".zip"
+    components.html(
+        """
+        <script>
+        (function() {
+            const a = window.parent.document.createElement('a');
+            a.href = 'data:application/zip;base64,%s';
+            a.download = %r;
+            window.parent.document.body.appendChild(a);
+            a.click();
+            a.remove();
+        })();
+        </script>
+        """ % (b64, fname),
+        height=0,
+    )
+    st.success("Downloading %s (contains %s.kmz and %s.dmt)." % (fname, out_name, out_name))
