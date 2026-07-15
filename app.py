@@ -1685,8 +1685,6 @@ def generate_dmt(kmz_path_or_bytes):
         tdata = streams[stream_name]
         if folder_name in ('AGMs', 'Notes'):
             pts = [p for p in items if p.kind == 'point']
-            if not pts:
-                continue
             t = PointLayerTemplate(tdata, has_symbol=(folder_name == 'AGMs'))
             if folder_name == 'AGMs':
                 resolver = make_agm_sig_resolver(t)
@@ -1695,8 +1693,6 @@ def generate_dmt(kmz_path_or_bytes):
             new_streams[stream_name] = t.build(pts, resolver)
         else:
             lns = [p for p in items if p.kind == 'line']
-            if not lns:
-                continue
             t = LineLayerTemplate(tdata)
 
             def color_fn(pm, fld=folder_name):
